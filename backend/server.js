@@ -33,25 +33,71 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/interview-qna', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('MongoDB connected'))
-.catch((err) => console.error('MongoDB connection error:', err));
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/interview-qna';
+
+const mongooseOptions = { serverSelectionTimeoutMS: 15000 };
+
+async function ensureMongoConnected() {
+  if (mongoose.connection.readyState === 1) return;
+  await mongoose.connect(MONGODB_URI, mongooseOptions);
+}
+
+// Eager connect so first request is fast when DB is healthy
+ensureMongoConnected()
+  .then(() => console.log('MongoDB connected'))
+  .catch((err) => console.error('MongoDB connection error:', err));
+
+app.get('/api/health', (req, res) => {
+  const mongoOk = mongoose.connection.readyState === 1;
+  res.status(mongoOk ? 200 : 503).json({
+    ok: mongoOk,
+    mongoState: mongoose.connection.readyState,
+    mongoStates: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' },
+  });
+});
+
+async function mongoGate(req, res, next) {
+  if (req.method === 'OPTIONS') {
+    next();
+    return;
+  }
+  try {
+    await ensureMongoConnected();
+    next();
+  } catch (err) {
+    console.error('mongoGate:', err.message);
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.status(503).json({
+      error: 'Database unavailable',
+      code: err.name || 'MongoError',
+      hint: 'Set MONGODB_URI on Railway and allow 0.0.0.0/0 (or Railway egress) in Atlas Network Access',
+    });
+  }
+}
 
 // Routes
-app.use('/api/qna', require('./routes/qnaRoutes'));
+app.use('/api/qna', mongoGate, require('./routes/qnaRoutes'));
 
 // Error handling middleware (include CORS so browsers show API errors, not generic CORS failures)
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(err.stack || err);
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
-  res.status(500).json({ error: 'Something went wrong!' });
+  const mongoErr =
+    err.name === 'MongoServerSelectionError'
+    || err.name === 'MongoNetworkError'
+    || err.name === 'MongoParseError'
+    || err.name === 'MongoAPIError';
+  const status = mongoErr ? 503 : 500;
+  res.status(status).json({
+    error: mongoErr ? 'Database error' : 'Something went wrong!',
+    code: err.name,
+  });
 });
 
 // Start server
