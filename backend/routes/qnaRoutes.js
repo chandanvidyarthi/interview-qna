@@ -2,7 +2,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const qnaSchema = new mongoose.Schema({}, { strict: false, timestamps: true });
-const Qna = mongoose.models.Qna || mongoose.model('Qna', qnaSchema);
+const collectionName = process.env.MONGODB_QNA_COLLECTION?.trim();
+const Qna = mongoose.models.Qna
+  || mongoose.model('Qna', qnaSchema, collectionName || undefined);
 
 const router = express.Router();
 

@@ -3,6 +3,8 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
+const mongo = require('./mongodb');
+
 const app = express();
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS
@@ -31,93 +33,54 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json());
-
-function resolveMongoUri() {
-  const v = process.env.MONGODB_URI?.trim()
-    || process.env.DATABASE_URL?.trim()
-    || process.env.MONGO_URI?.trim();
-  return v || null;
-}
+app.use(express.json({ limit: '2mb' }));
 
 const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
-const MONGODB_URI = resolveMongoUri()
+const MONGODB_URI = mongo.resolveMongoUri()
   || (isRailway ? null : 'mongodb://localhost:27017/interview-qna');
 
-/** Redact credentials from driver error text (safe to show in JSON). */
-function sanitizeForClient(msg) {
-  if (msg == null) return undefined;
-  let s = String(msg);
-  s = s.replace(/mongodb(\+srv)?:\/\/([^:@/]+):([^@/]+)@/gi, 'mongodb$1://***:***@');
-  return s.length > 400 ? `${s.slice(0, 400)}…` : s;
-}
-
-let lastMongoFailure = null;
-
-function recordMongoFailure(err) {
-  if (!err) return;
-  lastMongoFailure = {
-    at: new Date().toISOString(),
-    code: err.name || 'Error',
-    driverCode: typeof err.code === 'number' || typeof err.code === 'string' ? err.code : undefined,
-    message: sanitizeForClient(err.message),
-  };
-}
-
-function buildMongooseOptions() {
-  const opts = {
-    serverSelectionTimeoutMS: 15000,
-    connectTimeoutMS: 20000,
-  };
-  // Opt-in: some stacks need IPv4; others break if family is forced — default off
-  if (process.env.MONGODB_FORCE_IPV4 === '1') {
-    opts.family = 4;
-  }
-  return opts;
-}
-
-const mongooseOptions = buildMongooseOptions();
-
-function missingUriError() {
-  const err = new Error('MONGODB_URI (or DATABASE_URL) is not set');
-  err.name = 'MissingMongoConfiguration';
-  return err;
-}
-
-async function ensureMongoConnected() {
-  if (!MONGODB_URI) {
-    throw missingUriError();
-  }
-  if (mongoose.connection.readyState === 1) return;
-  try {
-    await mongoose.connect(MONGODB_URI, mongooseOptions);
-  } catch (err) {
-    recordMongoFailure(err);
-    throw err;
-  }
-}
-
-// Eager connect so first request is fast when DB is healthy
+// Warm-up connection (retries happen inside ensureConnected)
 if (MONGODB_URI) {
-  ensureMongoConnected()
-    .then(() => {
-      console.log('MongoDB connected');
-      lastMongoFailure = null;
-    })
-    .catch((err) => console.error('MongoDB connection error:', err));
+  mongo.ensureConnected(MONGODB_URI)
+    .then(() => console.log('MongoDB connected and ping OK'))
+    .catch((err) => console.error('MongoDB initial connect failed:', err.message));
 } else if (isRailway) {
-  console.error('Railway: set MONGODB_URI or DATABASE_URL to your Atlas connection string');
+  console.error(
+    `Railway: set one of ${mongo.ENV_KEYS.join(', ')} to your MongoDB Atlas connection string`,
+  );
 }
 
-app.get('/api/health', (req, res) => {
-  const mongoOk = mongoose.connection.readyState === 1;
-  res.status(mongoOk ? 200 : 503).json({
-    ok: mongoOk,
-    mongoUriConfigured: Boolean(MONGODB_URI),
+app.get('/api/health', async (req, res) => {
+  const mongoUriConfigured = Boolean(MONGODB_URI);
+  if (!mongoUriConfigured) {
+    res.status(503).json({
+      ok: false,
+      mongoUriConfigured: false,
+      mongoState: mongoose.connection.readyState,
+      lastMongoFailure: mongo.getLastMongoFailure(),
+      hint: `Add variable: ${mongo.ENV_KEYS[0]} (or DATABASE_URL) in Railway`,
+    });
+    return;
+  }
+
+  let pingOk = false;
+  if (mongoose.connection.readyState === 1) {
+    pingOk = await mongo.pingDb();
+  }
+
+  const ok = pingOk;
+  res.status(ok ? 200 : 503).json({
+    ok,
+    mongoUriConfigured: true,
     mongoState: mongoose.connection.readyState,
     mongoStates: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' },
-    lastMongoFailure: mongoOk ? null : lastMongoFailure,
+    lastMongoFailure: ok ? null : mongo.getLastMongoFailure(),
     mongodbForceIpv4: process.env.MONGODB_FORCE_IPV4 === '1',
+    optionalEnv: {
+      MONGODB_DB_NAME: 'if URI has no /dbname or wrong default database',
+      MONGODB_FORCE_IPV4: 'set to 1 if DNS/SRV fails on Railway',
+      MONGO_CONNECT_RETRIES: 'default 5',
+    },
   });
 });
 
@@ -127,7 +90,7 @@ async function mongoGate(req, res, next) {
     return;
   }
   try {
-    await ensureMongoConnected();
+    await mongo.ensureConnected(MONGODB_URI);
     next();
   } catch (err) {
     console.error('mongoGate:', err.message);
@@ -136,21 +99,20 @@ async function mongoGate(req, res, next) {
       res.setHeader('Access-Control-Allow-Origin', origin);
     }
     const missing = err.name === 'MissingMongoConfiguration';
-    recordMongoFailure(err);
+    mongo.recordMongoFailure(err);
     res.status(503).json({
       error: 'Database unavailable',
       code: err.name || 'MongoError',
       reason: missing ? 'MISSING_MONGODB_URI' : 'CONNECTION_FAILED',
       mongoUriConfigured: Boolean(MONGODB_URI),
-      detail: sanitizeForClient(err.message),
+      detail: mongo.sanitizeForClient(err.message),
       hint: missing
-        ? 'In Railway → Variables, add MONGODB_URI (or DATABASE_URL) with your Atlas string'
-        : 'Atlas → Network Access: allow 0.0.0.0/0. URI password must be URL-encoded. Open GET /api/health for lastMongoFailure.',
+        ? `Railway → Variables → ${mongo.ENV_KEYS[0]} or DATABASE_URL`
+        : 'Atlas: Network Access 0.0.0.0/0; Database user readWrite on cluster; password URL-encoded in URI. GET /api/health for lastMongoFailure.',
     });
   }
 }
 
-// Routes
 app.use('/api/qna', mongoGate, require('./routes/qnaRoutes'));
 
 function isMongoInfraError(err) {
@@ -162,17 +124,17 @@ function isMongoInfraError(err) {
 }
 
 function errorPayload(err) {
-  const mongo = isMongoInfraError(err);
+  const isMongo = isMongoInfraError(err);
   const payload = {
-    error: mongo ? 'Database error' : 'Something went wrong!',
+    error: isMongo ? 'Database error' : 'Something went wrong!',
     code: err.name || 'Error',
   };
   if (typeof err.code === 'number' || typeof err.code === 'string') {
     payload.driverCode = err.code;
   }
-  if (mongo) {
-    payload.detail = sanitizeForClient(err.message);
-    recordMongoFailure(err);
+  if (isMongo) {
+    payload.detail = mongo.sanitizeForClient(err.message);
+    mongo.recordMongoFailure(err);
   }
   if (process.env.API_ERROR_DETAILS === '1') {
     payload.message = err.message;
@@ -180,7 +142,6 @@ function errorPayload(err) {
   return payload;
 }
 
-// Error handling middleware (include CORS so browsers show API errors, not generic CORS failures)
 app.use((err, req, res, next) => {
   console.error(err.stack || err);
   const origin = req.headers.origin;
@@ -192,8 +153,7 @@ app.use((err, req, res, next) => {
   res.status(status).json(errorPayload(err));
 });
 
-// Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on 0.0.0.0:${PORT}`);
 });
