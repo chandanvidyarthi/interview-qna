@@ -1,0 +1,13 @@
+{
+  "name": "interview-qna",
+  "version": "1.0.0",
+  "description": "Interview QNA Application",
+  "main": "start.sh",
+  "scripts": {
+    "start": "sh start.sh",
+    "dev": "sh start.sh"
+  },
+  "engines": {
+    "node": "20"
+  }
+}
