@@ -1,6 +1,5 @@
 /**
- * Central MongoDB setup for Railway + Atlas.
- * Covers: env aliases, URI cleanup, retries, disconnect-before-retry, optional dbName, health ping.
+ * Central MongoDB setup (Atlas-compatible URIs, env aliases, retries, optional dbName, health ping).
  */
 
 const mongoose = require('mongoose');
@@ -155,7 +154,7 @@ async function ensureConnected(resolvedUri) {
   const options = buildConnectOptions();
   if (!uriHasDatabasePath(resolvedUri) && !process.env.MONGODB_DB_NAME?.trim()) {
     console.warn(
-      '[mongo] URI has no /database before ? — set MONGODB_DB_NAME in Railway or use ...net/yourDbName?...',
+      '[mongo] URI has no /database before ? — set MONGODB_DB_NAME or use ...net/yourDbName?...',
     );
   }
   const retries = Math.max(1, Math.min(8, Number(process.env.MONGO_CONNECT_RETRIES || 5)));

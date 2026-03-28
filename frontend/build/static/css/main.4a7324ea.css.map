@@ -1,0 +1,1 @@
+{"version":3,"file":"static/css/main.4a7324ea.css","mappings":"AAAA,EAGE,qBAAsB,CAFtB,QAAS,CACT,SAEF,CAEA,KACE,qDACF","sources":["App.css"],"sourcesContent":["* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nbody {\n  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n}\n"],"names":[],"sourceRoot":""}

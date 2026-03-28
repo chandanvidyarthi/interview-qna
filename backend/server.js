@@ -8,7 +8,7 @@ const mongo = require('./mongodb');
 const app = express();
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS
-  || 'https://interviewly-d5eb7.web.app,http://localhost:3000,http://localhost:5173')
+  || 'http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -35,35 +35,14 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 
-const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
-const MONGODB_URI = mongo.resolveMongoUri()
-  || (isRailway ? null : 'mongodb://localhost:27017/interview-qna');
+const MONGODB_URI = mongo.resolveMongoUri() || 'mongodb://localhost:27017/interview-qna';
 
 // Warm-up connection (retries happen inside ensureConnected)
-if (MONGODB_URI) {
-  mongo.ensureConnected(MONGODB_URI)
-    .then(() => console.log('MongoDB connected and ping OK'))
-    .catch((err) => console.error('MongoDB initial connect failed:', err.message));
-} else if (isRailway) {
-  console.error(
-    `Railway: set one of ${mongo.ENV_KEYS.join(', ')} to your MongoDB Atlas connection string`,
-  );
-}
+mongo.ensureConnected(MONGODB_URI)
+  .then(() => console.log('MongoDB connected and ping OK'))
+  .catch((err) => console.error('MongoDB initial connect failed:', err.message));
 
 app.get('/api/health', async (req, res) => {
-  const mongoUriConfigured = Boolean(MONGODB_URI);
-  if (!mongoUriConfigured) {
-    res.status(503).json({
-      ok: false,
-      mongoUriConfigured: false,
-      mongoUriDiagnostics: mongo.getUriDiagnostics(MONGODB_URI),
-      mongoState: mongoose.connection.readyState,
-      lastMongoFailure: mongo.getLastMongoFailure(),
-      hint: `Add variable: ${mongo.ENV_KEYS[0]} (or DATABASE_URL) in Railway`,
-    });
-    return;
-  }
-
   let pingOk = false;
   if (mongoose.connection.readyState === 1) {
     pingOk = await mongo.pingDb();
@@ -80,7 +59,7 @@ app.get('/api/health', async (req, res) => {
     mongodbForceIpv4: process.env.MONGODB_FORCE_IPV4 === '1',
     optionalEnv: {
       MONGODB_DB_NAME: 'if URI has no /dbname or wrong default database',
-      MONGODB_FORCE_IPV4: 'set to 1 if DNS/SRV fails on Railway',
+      MONGODB_FORCE_IPV4: 'set to 1 if mongodb+srv DNS/SRV resolution fails',
       MONGO_CONNECT_RETRIES: 'default 5',
     },
   });
@@ -109,8 +88,8 @@ async function mongoGate(req, res, next) {
       mongoUriConfigured: Boolean(MONGODB_URI),
       detail: mongo.sanitizeForClient(err.message),
       hint: missing
-        ? `Railway → Variables → ${mongo.ENV_KEYS[0]} or DATABASE_URL`
-        : 'Atlas: Network Access 0.0.0.0/0; Database user readWrite on cluster; password URL-encoded in URI. GET /api/health for lastMongoFailure.',
+        ? `Set ${mongo.ENV_KEYS[0]} or DATABASE_URL in your environment`
+        : 'Check MongoDB is reachable, credentials, and Atlas IP allowlist if using Atlas. GET /api/health for lastMongoFailure.',
     });
   }
 }
