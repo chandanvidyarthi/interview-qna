@@ -44,11 +44,39 @@ const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY
 const MONGODB_URI = resolveMongoUri()
   || (isRailway ? null : 'mongodb://localhost:27017/interview-qna');
 
-const mongooseOptions = {
-  serverSelectionTimeoutMS: 15000,
-  // Atlas + Railway: some regions resolve SRV/IPv6 poorly; IPv4 often fixes ECONNREFUSED / timeouts
-  family: 4,
-};
+/** Redact credentials from driver error text (safe to show in JSON). */
+function sanitizeForClient(msg) {
+  if (msg == null) return undefined;
+  let s = String(msg);
+  s = s.replace(/mongodb(\+srv)?:\/\/([^:@/]+):([^@/]+)@/gi, 'mongodb$1://***:***@');
+  return s.length > 400 ? `${s.slice(0, 400)}…` : s;
+}
+
+let lastMongoFailure = null;
+
+function recordMongoFailure(err) {
+  if (!err) return;
+  lastMongoFailure = {
+    at: new Date().toISOString(),
+    code: err.name || 'Error',
+    driverCode: typeof err.code === 'number' || typeof err.code === 'string' ? err.code : undefined,
+    message: sanitizeForClient(err.message),
+  };
+}
+
+function buildMongooseOptions() {
+  const opts = {
+    serverSelectionTimeoutMS: 15000,
+    connectTimeoutMS: 20000,
+  };
+  // Opt-in: some stacks need IPv4; others break if family is forced — default off
+  if (process.env.MONGODB_FORCE_IPV4 === '1') {
+    opts.family = 4;
+  }
+  return opts;
+}
+
+const mongooseOptions = buildMongooseOptions();
 
 function missingUriError() {
   const err = new Error('MONGODB_URI (or DATABASE_URL) is not set');
@@ -61,13 +89,21 @@ async function ensureMongoConnected() {
     throw missingUriError();
   }
   if (mongoose.connection.readyState === 1) return;
-  await mongoose.connect(MONGODB_URI, mongooseOptions);
+  try {
+    await mongoose.connect(MONGODB_URI, mongooseOptions);
+  } catch (err) {
+    recordMongoFailure(err);
+    throw err;
+  }
 }
 
 // Eager connect so first request is fast when DB is healthy
 if (MONGODB_URI) {
   ensureMongoConnected()
-    .then(() => console.log('MongoDB connected'))
+    .then(() => {
+      console.log('MongoDB connected');
+      lastMongoFailure = null;
+    })
     .catch((err) => console.error('MongoDB connection error:', err));
 } else if (isRailway) {
   console.error('Railway: set MONGODB_URI or DATABASE_URL to your Atlas connection string');
@@ -80,6 +116,8 @@ app.get('/api/health', (req, res) => {
     mongoUriConfigured: Boolean(MONGODB_URI),
     mongoState: mongoose.connection.readyState,
     mongoStates: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' },
+    lastMongoFailure: mongoOk ? null : lastMongoFailure,
+    mongodbForceIpv4: process.env.MONGODB_FORCE_IPV4 === '1',
   });
 });
 
@@ -98,14 +136,16 @@ async function mongoGate(req, res, next) {
       res.setHeader('Access-Control-Allow-Origin', origin);
     }
     const missing = err.name === 'MissingMongoConfiguration';
+    recordMongoFailure(err);
     res.status(503).json({
       error: 'Database unavailable',
       code: err.name || 'MongoError',
       reason: missing ? 'MISSING_MONGODB_URI' : 'CONNECTION_FAILED',
       mongoUriConfigured: Boolean(MONGODB_URI),
+      detail: sanitizeForClient(err.message),
       hint: missing
         ? 'In Railway → Variables, add MONGODB_URI (or DATABASE_URL) with your Atlas string'
-        : 'Atlas → Network Access: allow 0.0.0.0/0 (or your IP). Check password is URL-encoded in the URI.',
+        : 'Atlas → Network Access: allow 0.0.0.0/0. URI password must be URL-encoded. Open GET /api/health for lastMongoFailure.',
     });
   }
 }
@@ -122,12 +162,17 @@ function isMongoInfraError(err) {
 }
 
 function errorPayload(err) {
+  const mongo = isMongoInfraError(err);
   const payload = {
-    error: isMongoInfraError(err) ? 'Database error' : 'Something went wrong!',
+    error: mongo ? 'Database error' : 'Something went wrong!',
     code: err.name || 'Error',
   };
   if (typeof err.code === 'number' || typeof err.code === 'string') {
     payload.driverCode = err.code;
+  }
+  if (mongo) {
+    payload.detail = sanitizeForClient(err.message);
+    recordMongoFailure(err);
   }
   if (process.env.API_ERROR_DETAILS === '1') {
     payload.message = err.message;
