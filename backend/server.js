@@ -56,6 +56,7 @@ app.get('/api/health', async (req, res) => {
     res.status(503).json({
       ok: false,
       mongoUriConfigured: false,
+      mongoUriDiagnostics: mongo.getUriDiagnostics(MONGODB_URI),
       mongoState: mongoose.connection.readyState,
       lastMongoFailure: mongo.getLastMongoFailure(),
       hint: `Add variable: ${mongo.ENV_KEYS[0]} (or DATABASE_URL) in Railway`,
@@ -72,6 +73,7 @@ app.get('/api/health', async (req, res) => {
   res.status(ok ? 200 : 503).json({
     ok,
     mongoUriConfigured: true,
+    mongoUriDiagnostics: mongo.getUriDiagnostics(MONGODB_URI),
     mongoState: mongoose.connection.readyState,
     mongoStates: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' },
     lastMongoFailure: ok ? null : mongo.getLastMongoFailure(),

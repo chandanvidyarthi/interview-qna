@@ -30,14 +30,45 @@ function resolveMongoUri() {
   return null;
 }
 
-/** Atlas drivers expect retryWrites + w=majority; append if user pasted a short URI. */
+/**
+ * Append standard Atlas query params if missing (short pasted URIs often omit them).
+ * authSource=admin: Atlas database users authenticate against the admin DB by default.
+ */
 function ensureAtlasQueryParams(uri) {
   if (!uri || (!uri.startsWith('mongodb+srv://') && !uri.startsWith('mongodb://'))) {
     return uri;
   }
-  if (/[?&]retryWrites=/.test(uri)) return uri;
-  const sep = uri.includes('?') ? '&' : '?';
-  return `${uri}${sep}retryWrites=true&w=majority`;
+  let u = uri;
+  const addParam = (key, value) => {
+    const re = new RegExp(`[?&]${key}=`, 'i');
+    if (re.test(u)) return;
+    u += (u.includes('?') ? '&' : '?') + `${key}=${value}`;
+  };
+  addParam('retryWrites', 'true');
+  addParam('w', 'majority');
+  if (uri.startsWith('mongodb+srv://')) {
+    addParam('authSource', 'admin');
+  }
+  return u;
+}
+
+/** True if URI has ...mongodb.net/<dbname> before ? */
+function uriHasDatabasePath(uri) {
+  if (!uri) return false;
+  return /\.mongodb\.net\/[^/?]+/i.test(uri);
+}
+
+/** Safe flags for /api/health (no secrets). */
+function getUriDiagnostics(resolvedUri) {
+  if (!resolvedUri) {
+    return { mongoUriPresent: false };
+  }
+  return {
+    mongoUriPresent: true,
+    looksLikeAtlas: /\.mongodb\.net/i.test(resolvedUri),
+    databaseNameInUriPath: uriHasDatabasePath(resolvedUri),
+    mongodbDbNameEnvSet: Boolean(process.env.MONGODB_DB_NAME?.trim()),
+  };
 }
 
 function sanitizeForClient(msg) {
@@ -122,6 +153,11 @@ async function ensureConnected(resolvedUri) {
 
   const uri = ensureAtlasQueryParams(resolvedUri);
   const options = buildConnectOptions();
+  if (!uriHasDatabasePath(resolvedUri) && !process.env.MONGODB_DB_NAME?.trim()) {
+    console.warn(
+      '[mongo] URI has no /database before ? — set MONGODB_DB_NAME in Railway or use ...net/yourDbName?...',
+    );
+  }
   const retries = Math.max(1, Math.min(8, Number(process.env.MONGO_CONNECT_RETRIES || 5)));
   const delayMs = Math.max(500, Number(process.env.MONGO_CONNECT_RETRY_DELAY_MS || 2500));
 
@@ -171,6 +207,8 @@ module.exports = {
   resolveMongoUri,
   normalizeMongoUri,
   ensureAtlasQueryParams,
+  uriHasDatabasePath,
+  getUriDiagnostics,
   sanitizeForClient,
   recordMongoFailure,
   clearMongoFailure,
