@@ -5,13 +5,32 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware
-app.use(cors({
-  origin: '*',
+const allowedOrigins = (process.env.ALLOWED_ORIGINS
+  || 'https://interviewly-d5eb7.web.app,http://localhost:3000,http://localhost:5173')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(null, false);
+  },
   credentials: false,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // MongoDB Connection
@@ -25,9 +44,13 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/interview
 // Routes
 app.use('/api/qna', require('./routes/qnaRoutes'));
 
-// Error handling middleware
+// Error handling middleware (include CORS so browsers show API errors, not generic CORS failures)
 app.use((err, req, res, next) => {
   console.error(err.stack);
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
