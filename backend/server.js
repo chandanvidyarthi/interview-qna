@@ -33,24 +33,51 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/interview-qna';
+function resolveMongoUri() {
+  const v = process.env.MONGODB_URI?.trim()
+    || process.env.DATABASE_URL?.trim()
+    || process.env.MONGO_URI?.trim();
+  return v || null;
+}
 
-const mongooseOptions = { serverSelectionTimeoutMS: 15000 };
+const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+const MONGODB_URI = resolveMongoUri()
+  || (isRailway ? null : 'mongodb://localhost:27017/interview-qna');
+
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 15000,
+  // Atlas + Railway: some regions resolve SRV/IPv6 poorly; IPv4 often fixes ECONNREFUSED / timeouts
+  family: 4,
+};
+
+function missingUriError() {
+  const err = new Error('MONGODB_URI (or DATABASE_URL) is not set');
+  err.name = 'MissingMongoConfiguration';
+  return err;
+}
 
 async function ensureMongoConnected() {
+  if (!MONGODB_URI) {
+    throw missingUriError();
+  }
   if (mongoose.connection.readyState === 1) return;
   await mongoose.connect(MONGODB_URI, mongooseOptions);
 }
 
 // Eager connect so first request is fast when DB is healthy
-ensureMongoConnected()
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+if (MONGODB_URI) {
+  ensureMongoConnected()
+    .then(() => console.log('MongoDB connected'))
+    .catch((err) => console.error('MongoDB connection error:', err));
+} else if (isRailway) {
+  console.error('Railway: set MONGODB_URI or DATABASE_URL to your Atlas connection string');
+}
 
 app.get('/api/health', (req, res) => {
   const mongoOk = mongoose.connection.readyState === 1;
   res.status(mongoOk ? 200 : 503).json({
     ok: mongoOk,
+    mongoUriConfigured: Boolean(MONGODB_URI),
     mongoState: mongoose.connection.readyState,
     mongoStates: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' },
   });
@@ -70,10 +97,15 @@ async function mongoGate(req, res, next) {
     if (origin && allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
     }
+    const missing = err.name === 'MissingMongoConfiguration';
     res.status(503).json({
       error: 'Database unavailable',
       code: err.name || 'MongoError',
-      hint: 'Set MONGODB_URI on Railway and allow 0.0.0.0/0 (or Railway egress) in Atlas Network Access',
+      reason: missing ? 'MISSING_MONGODB_URI' : 'CONNECTION_FAILED',
+      mongoUriConfigured: Boolean(MONGODB_URI),
+      hint: missing
+        ? 'In Railway → Variables, add MONGODB_URI (or DATABASE_URL) with your Atlas string'
+        : 'Atlas → Network Access: allow 0.0.0.0/0 (or your IP). Check password is URL-encoded in the URI.',
     });
   }
 }
