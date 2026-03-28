@@ -1,1 +1,1 @@
-web: sh start.sh
+web: node server.js

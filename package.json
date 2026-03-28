@@ -2,12 +2,18 @@
   "name": "interview-qna",
   "version": "1.0.0",
   "description": "Interview QNA Application",
-  "main": "start.sh",
+  "main": "server.js",
   "scripts": {
-    "start": "sh start.sh",
-    "dev": "sh start.sh"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "engines": {
     "node": "20"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongoose": "^8.9.5"
   }
 }
