@@ -113,6 +113,28 @@ async function mongoGate(req, res, next) {
 // Routes
 app.use('/api/qna', mongoGate, require('./routes/qnaRoutes'));
 
+function isMongoInfraError(err) {
+  const name = err.name || '';
+  if (name === 'CastError' || name === 'ValidationError') return false;
+  if (name.startsWith('Mongo')) return true;
+  if (name === 'MongooseError') return true;
+  return false;
+}
+
+function errorPayload(err) {
+  const payload = {
+    error: isMongoInfraError(err) ? 'Database error' : 'Something went wrong!',
+    code: err.name || 'Error',
+  };
+  if (typeof err.code === 'number' || typeof err.code === 'string') {
+    payload.driverCode = err.code;
+  }
+  if (process.env.API_ERROR_DETAILS === '1') {
+    payload.message = err.message;
+  }
+  return payload;
+}
+
 // Error handling middleware (include CORS so browsers show API errors, not generic CORS failures)
 app.use((err, req, res, next) => {
   console.error(err.stack || err);
@@ -120,16 +142,9 @@ app.use((err, req, res, next) => {
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
-  const mongoErr =
-    err.name === 'MongoServerSelectionError'
-    || err.name === 'MongoNetworkError'
-    || err.name === 'MongoParseError'
-    || err.name === 'MongoAPIError';
+  const mongoErr = isMongoInfraError(err);
   const status = mongoErr ? 503 : 500;
-  res.status(status).json({
-    error: mongoErr ? 'Database error' : 'Something went wrong!',
-    code: err.name,
-  });
+  res.status(status).json(errorPayload(err));
 });
 
 // Start server

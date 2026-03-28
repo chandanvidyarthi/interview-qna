@@ -8,7 +8,7 @@ const router = express.Router();
 
 router.get('/', async (req, res, next) => {
   try {
-    const items = await Qna.find().sort({ createdAt: -1 }).limit(200).lean();
+    const items = await Qna.find().sort({ _id: -1 }).limit(200).lean();
     res.json(items);
   } catch (err) {
     next(err);
